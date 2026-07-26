@@ -29,6 +29,47 @@ DECL_RE = re.compile(
 )
 
 
+NS_OPEN = re.compile(r"^\s*namespace\s+([A-Za-z_][A-Za-z0-9_'.\u00c0-\uffff]*)", re.M)
+NS_END = re.compile(r"^\s*end\s*([A-Za-z_][A-Za-z0-9_'.\u00c0-\uffff]*)?\s*$", re.M)
+
+
+def namespace_spans(src: str) -> list[tuple[int, str]]:
+    """[(char_offset, dotted_namespace_prefix)] checkpoints, in order.
+
+    Tracks `namespace X ... end X` nesting. A bare `end` (or an `end` naming
+    something other than the innermost namespace) closes a `section`, not a
+    namespace, so it is ignored — matching Lean's own scoping.
+    """
+    events = []
+    for m in NS_OPEN.finditer(src):
+        events.append((m.start(), "open", m.group(1)))
+    for m in NS_END.finditer(src):
+        events.append((m.start(), "end", m.group(1)))
+    events.sort()
+    stack: list[str] = []
+    spans: list[tuple[int, str]] = [(0, "")]
+    for pos, kind, nm in events:
+        if kind == "open":
+            stack.append(nm)
+        elif stack and nm and (stack[-1] == nm or ".".join(stack).endswith(nm)):
+            stack.pop()
+        spans.append((pos, ".".join(stack)))
+    return spans
+
+
+def namespace_at(spans: list[tuple[int, str]], pos: int) -> str:
+    lo, hi = 0, len(spans) - 1
+    best = ""
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        if spans[mid][0] <= pos:
+            best = spans[mid][1]
+            lo = mid + 1
+        else:
+            hi = mid - 1
+    return best
+
+
 def subtokens(name: str) -> str:
     """mul_le_mul_left / Finset.sum_comm -> searchable word soup."""
     parts = re.split(r"[._]", name)
@@ -61,10 +102,18 @@ def main():
                 src = open(path, encoding="utf-8").read()
             except OSError:
                 continue
+            ns_spans = namespace_spans(src)
             for m in DECL_RE.finditer(src):
                 name = m.group("name")
                 if name.startswith("_"):
                     continue
+                # Qualify with the enclosing `namespace` blocks: Mathlib
+                # declares `theorem mul_le_mul_left` inside `namespace Nat`,
+                # and an agent citing the bare name writes an unknown
+                # identifier. Retrieval must return what Lean will accept.
+                prefix = namespace_at(ns_spans, m.start("name"))
+                if prefix:
+                    name = f"{prefix}.{name}"
                 sig = re.sub(r"\s+", " ", (m.group("sig") or "")).strip()
                 doc = (m.group("doc") or "").strip()
                 doc = re.sub(r"^/--\s*|\s*-/$", "", doc)
