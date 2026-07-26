@@ -47,6 +47,39 @@ class SearchReq(BaseModel):
     k: int = 12
 
 
+MATH_SYNONYMS = {
+    # English math vocabulary -> Mathlib naming tokens. The paper's canonical
+    # queries ("monotonicity of natural number addition") arrive in English;
+    # Mathlib names speak in abbreviations (Nat.add_le_add_left). Expanding
+    # the query with both sides closes that gap without any embedding model.
+    "multiplication": ["mul"], "multiply": ["mul"], "times": ["mul"], "product": ["mul", "prod"],
+    "addition": ["add"], "plus": ["add"], "sum": ["add", "sum"],
+    "subtraction": ["sub"], "minus": ["sub"],
+    "division": ["div"], "divide": ["div"], "quotient": ["div"],
+    "divisible": ["dvd"], "divides": ["dvd"], "divisibility": ["dvd"],
+    "inequality": ["le", "lt"], "less": ["le", "lt"], "greater": ["ge", "gt"],
+    "equal": ["eq"], "equality": ["eq"], "equals": ["eq"],
+    "monotone": ["mono", "le"], "monotonicity": ["mono", "le"], "monotonic": ["mono", "le"],
+    "commutative": ["comm"], "commutativity": ["comm"], "commute": ["comm"],
+    "associative": ["assoc"], "associativity": ["assoc"],
+    "distributive": ["distrib"], "distributivity": ["distrib"],
+    "natural": ["nat"], "naturals": ["nat"], "integer": ["int"], "integers": ["int"],
+    "rational": ["rat"], "rationals": ["rat"], "reals": ["real"],
+    "power": ["pow"], "exponent": ["pow"], "exponential": ["exp", "pow"],
+    "root": ["sqrt"], "factorial": ["factorial"],
+    "absolute": ["abs"], "minimum": ["min"], "maximum": ["max"],
+    "modulo": ["mod", "emod"], "remainder": ["mod", "emod"], "modular": ["mod", "modeq"],
+    "cardinality": ["card"], "size": ["card"], "count": ["card", "count"],
+    "nonnegative": ["nonneg"], "positive": ["pos"], "negative": ["neg"],
+    "injective": ["injective"], "surjective": ["surjective"], "bijective": ["bijective"],
+    "even": ["even"], "odd": ["odd"], "coprime": ["coprime"],
+}
+
+
+STOPWORDS = {"of", "the", "for", "and", "with", "that", "this", "number", "numbers",
+             "lemma", "theorem", "about", "between", "over", "under", "are", "is"}
+
+
 def sanitize(q: str) -> list[str]:
     words = re.findall(r"[A-Za-z0-9_.']+", q)
     toks = []
@@ -54,7 +87,11 @@ def sanitize(q: str) -> list[str]:
         toks += re.split(r"[._]", w)
         toks.append(w.replace("'", ""))
     toks = [t.lower() for t in toks if len(t) > 1]
-    return list(dict.fromkeys(toks))[:12]
+    toks = [t for t in toks if t not in STOPWORDS]
+    expanded = list(toks)
+    for t in toks:
+        expanded += MATH_SYNONYMS.get(t, [])
+    return list(dict.fromkeys(expanded))[:16]
 
 
 @app.get("/health")
