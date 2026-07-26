@@ -1,51 +1,50 @@
 """Leak XI — `mathlib_search`, the retrieval tool of the Architect stack.
 
+Real FastMCP server (matching Leak-I/II's own wrapper architecture exactly:
+mcp.server.fastmcp.FastMCP, @mcp.tool()-decorated functions, served via
+mcp.sse_app() + uvicorn on 7860) rather than a bespoke REST API — so it is a
+genuine MCP server the app's existing "Add Server" flow can register and
+live-handshake against, like every other Leak server.
+
 Contract (paper C.2): a lookup helper for *specific* Mathlib lemmas — a
 name, a signature fragment, a hypothesis pattern ("monotonicity of natural
 number addition", "Cauchy-Schwarz inequality"), or recovering the right
-name after an "Unknown constant" error. Returns compact, citeable results:
-name + kind + signature + docstring + module.
+name after an "Unknown constant" error. Returns compact, citeable results.
 
 Query handling: FTS5 lexical match over names (with camelCase/snake_case
-subtoken expansion), signatures, and docstrings; graceful fallback from
-strict AND to OR matching so near-miss queries still return candidates.
+subtoken expansion + a math-English synonym table), signatures, and
+docstrings; graceful fallback from strict AND to OR matching so near-miss
+queries still return candidates.
 """
 
+import asyncio
+import logging
 import os
 import re
 import sqlite3
 
-from fastapi import FastAPI
-from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+import nest_asyncio
+import uvicorn
+from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
+from starlette.middleware.cors import CORSMiddleware
+
+nest_asyncio.apply()
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logger = logging.getLogger("leak-xi")
 
 DB_PATH = os.environ.get("DB_PATH", "/opt/index/mathlib.db")
 
-app = FastAPI(title="Leak XI", version="1.0")
-
-# Optional shared-secret gate. When LEAK_SERVICE_TOKEN is set, every request
-# except /health must carry `Authorization: Bearer <token>`. These services
-# compile arbitrary Lean, which can perform IO at elaboration time — so an
-# open port without this is an unauthenticated code-execution surface.
-SERVICE_TOKEN = os.environ.get("LEAK_SERVICE_TOKEN", "")
-
-
-@app.middleware("http")
-async def _require_token(request, call_next):
-    if SERVICE_TOKEN and request.url.path != "/health":
-        if request.headers.get("authorization", "") != f"Bearer {SERVICE_TOKEN}":
-            return JSONResponse({"error": "unauthorized"}, status_code=401)
-    return await call_next(request)
-
+mcp = FastMCP(
+    "Leak-XI",
+    transport_security=TransportSecuritySettings(
+        enable_dns_rebinding_protection=False,
+    ),
+)
 
 con = sqlite3.connect(DB_PATH, check_same_thread=False)
 con.row_factory = sqlite3.Row
-
-
-class SearchReq(BaseModel):
-    query: str
-    k: int = 12
-
 
 MATH_SYNONYMS = {
     # English math vocabulary -> Mathlib naming tokens. The paper's canonical
@@ -75,7 +74,6 @@ MATH_SYNONYMS = {
     "even": ["even"], "odd": ["odd"], "coprime": ["coprime"],
 }
 
-
 STOPWORDS = {"of", "the", "for", "and", "with", "that", "this", "number", "numbers",
              "lemma", "theorem", "about", "between", "over", "under", "are", "is"}
 
@@ -94,44 +92,78 @@ def sanitize(q: str) -> list[str]:
     return list(dict.fromkeys(expanded))[:16]
 
 
-@app.get("/health")
-def health():
-    n = con.execute("SELECT count(*) c FROM decls").fetchone()["c"]
-    return {"service": "leak-xi", "decls": n}
+@mcp.tool()
+async def mathlib_search(query: str, k: int = 12) -> str:
+    """
+    Look up specific Mathlib declarations by name, signature fragment, or
+    hypothesis pattern -- e.g. "monotonicity of natural number multiplication",
+    "Cauchy-Schwarz inequality", or a bare name fragment after an "Unknown
+    constant" / "Unknown identifier" compiler error.
 
-
-@app.post("/search")
-def search(req: SearchReq):
-    toks = sanitize(req.query)
-    if not toks:
-        return {"results": []}
-    k = max(1, min(req.k, 30))
-
-    def run(match: str, limit: int):
-        try:
-            return con.execute(
-                "SELECT name, kind, signature, docstring, module, rank"
-                " FROM decls WHERE decls MATCH ? ORDER BY rank LIMIT ?",
-                (match, limit),
-            ).fetchall()
-        except sqlite3.OperationalError:
+    Mathlib does NOT contain the solution to your overall problem, so do not
+    use this to "find the proof" -- use it only to resolve a specific lemma
+    you already know you need. Returns name + kind + signature + docstring +
+    module for each match, ranked by relevance.
+    """
+    def run_query():
+        toks = sanitize(query)
+        if not toks:
             return []
+        limit = max(1, min(k, 30))
 
-    quoted = [f'"{t}"' for t in toks]
-    rows = run(" AND ".join(quoted), k)
-    if len(rows) < k:
-        seen = {r["name"] for r in rows}
-        rows += [r for r in run(" OR ".join(quoted), k * 2) if r["name"] not in seen][: k - len(rows)]
+        def run(match: str, lim: int):
+            try:
+                return con.execute(
+                    "SELECT name, kind, signature, docstring, module, rank"
+                    " FROM decls WHERE decls MATCH ? ORDER BY rank LIMIT ?",
+                    (match, lim),
+                ).fetchall()
+            except sqlite3.OperationalError:
+                return []
 
-    return {
-        "results": [
-            {
-                "name": r["name"],
-                "kind": r["kind"],
-                "signature": r["signature"],
-                "docstring": r["docstring"],
-                "module": r["module"],
-            }
-            for r in rows[:k]
-        ]
-    }
+        quoted = [f'"{t}"' for t in toks]
+        rows = run(" AND ".join(quoted), limit)
+        if len(rows) < limit:
+            seen = {r["name"] for r in rows}
+            rows += [r for r in run(" OR ".join(quoted), limit * 2) if r["name"] not in seen][: limit - len(rows)]
+        return rows[:limit]
+
+    logger.info(f"mathlib_search query: {query!r}")
+    rows = await asyncio.to_thread(run_query)
+    if not rows:
+        return ("No Mathlib declarations matched. Try different keywords, or "
+                "compile `example : <goal> := by exact?` instead.")
+    return "\n".join(
+        f"{r['kind']} {r['name']} : {r['signature']}" + (f"\n    -- {r['docstring']}" if r["docstring"] else "")
+        for r in rows
+    )
+
+
+async def main_serve():
+    n = con.execute("SELECT count(*) c FROM decls").fetchone()["c"]
+    logger.info(f"Leak XI booting — {n} declarations indexed.")
+
+    http_app = mcp.sse_app()
+    http_app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_methods=["*"],
+        allow_headers=["*", "mcp-protocol-version", "mcp-session-id"],
+        expose_headers=["mcp-session-id"],
+    )
+
+    logger.info("Serving Leak XI MCP (SSE) on 0.0.0.0:7860")
+    config = uvicorn.Config(
+        http_app,
+        host="0.0.0.0",
+        port=7860,
+        proxy_headers=True,
+        forwarded_allow_ips="*",
+        log_level="info",
+    )
+    server = uvicorn.Server(config)
+    await server.serve()
+
+
+if __name__ == "__main__":
+    asyncio.run(main_serve())

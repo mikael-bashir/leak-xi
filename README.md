@@ -4,7 +4,6 @@ emoji: 🔍
 colorFrom: indigo
 colorTo: blue
 sdk: docker
-app_port: 8011
 pinned: false
 ---
 
