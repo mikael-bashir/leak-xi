@@ -22,12 +22,14 @@ the toolchain **Leak XII** and **Leak XIV** elaborate with.
 |---|---|---|
 | `loogle_search` | "What is the real name / signature?" (Lean pattern or name) | **Yes** — zero hits is proof of absence |
 | `moogle_search` | "What is this concept called in Mathlib?" (English) | No — always returns nearest neighbours |
-| `mathlib_search` | compatibility router; picks one of the above by query shape | inherits whichever it used |
 
-They are separate on purpose. `loogle_search` searches the *elaborated
-environment*, so an empty result is evidence; `moogle_search` is a vector
-index that always has a best guess. Merging them destroys the negative answer,
-and the negative answer is the expensive one to be without.
+Two tools, and deliberately no third that merges them. `loogle_search`
+searches the *elaborated environment*, so an empty result is evidence;
+`moogle_search` is a vector index that always has a best guess. A caller has
+to know which kind of answer it is holding, and a router that picks by query
+shape hands back an answer whose evidential weight depends on a guess the
+caller never sees — the same defect this server exists to remove, one layer
+up.
 
 ## Why this replaced the FTS index
 

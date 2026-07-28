@@ -29,8 +29,13 @@ The split into two tools is deliberate: they answer different questions, and
 merging them destroys the negative answer. `loogle_search` is exact and
 falsifiable (a pattern that matches nothing is a PROOF of absence);
 `moogle_search` is fuzzy and always returns its best guesses, which is right
-for discovery and useless as evidence. `mathlib_search` is kept as a
-compatibility entry point for clients that predate the split.
+for discovery and useless as evidence.
+
+There is deliberately NO merged `mathlib_search` entry point. A router that
+picks between the two by the shape of the query has to guess, and it hands
+back an answer whose evidential weight depends on a guess the caller cannot
+see — which is the defect this server exists to remove, reintroduced one layer
+up. Callers name the tool that answers their question.
 """
 
 import asyncio
@@ -480,53 +485,6 @@ async def moogle_search(concept: str, k: int = 10) -> str:
             f"Use loogle_search instead — a name substring in quotes (e.g. \"div_eq\") is the "
             f"closest equivalent for discovery."
         )
-
-
-# ==========================================
-# TOOL 3: mathlib_search — compatibility entry point
-# ==========================================
-@mcp.tool()
-async def mathlib_search(query: str, k: int = 12) -> str:
-    """
-    Compatibility entry point that routes to loogle_search or moogle_search by
-    the shape of the query. Prefer calling those two directly — they document
-    what their answers mean, and this router has to guess.
-
-    Lean-shaped queries (a name, a quoted substring, a type pattern) go to
-    loogle. English prose goes to moogle. A loogle miss on a name-shaped query
-    is reported as the definitive negative it is, followed by semantic
-    suggestions that are clearly labelled as DIFFERENT declarations.
-    """
-    q = (query or "").strip()
-    if not q:
-        return "Empty query. Give a Lean name/pattern, or describe the concept in English."
-
-    lean_shaped = is_name_query(q) or bool(re.search(r'[_?()|\[\]{}^*+/\\=<>∀∃∣≤≥→↔·]|"', q))
-    logger.info(f"mathlib_search: {q!r} -> {'loogle' if lean_shaped else 'moogle'}")
-
-    if not lean_shaped:
-        try:
-            rows = await moogle_engine.query(q, k)
-            if rows:
-                return render_moogle(rows, q)
-        except Exception as e:
-            logger.error(f"[compat] moogle leg failed: {e}")
-        return render_loogle(await loogle_engine.search(q), q)
-
-    result = await loogle_engine.search(q)
-    rendered = render_loogle(result, q)
-    if result.get("hits"):
-        return rendered
-    # A miss. Keep the definitive negative FIRST and in full, then offer
-    # semantic candidates under a heading that cannot be misread as "did you
-    # mean" — they are other declarations, not spellings of the one asked for.
-    try:
-        rows = await moogle_engine.query(q.replace("_", " ").replace(".", " "), min(k, 8))
-        if rows:
-            return rendered + "\n\n--- Semantically related declarations (DIFFERENT names, none is the one above) ---\n" + render_moogle(rows, q)
-    except Exception:
-        pass
-    return rendered
 
 
 async def main_serve():
