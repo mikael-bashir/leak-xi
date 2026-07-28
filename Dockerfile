@@ -82,7 +82,33 @@ COPY --chown=user . ${HOME}/app
 RUN uv python install 3.11
 RUN uv venv --python 3.11 ${HOME}/app/.venv
 ENV PATH="${HOME}/app/.venv/bin:${PATH}"
+
+# torch FIRST, from PyTorch's CPU index.
+#
+# sentence-transformers depends on torch, and torch's default PyPI wheel for
+# linux-x86_64 is the CUDA build: it drags in nvidia-cublas (403 MiB),
+# nvidia-cudnn (349 MiB), nvidia-cusolver (192 MiB) and friends. Measured on
+# the previous build of this Space: 2589 MiB of the 2747 MiB pip download —
+# 94% — was GPU runtime, on a CPU-only Space that can never execute a single
+# byte of it. It is re-fetched on every rebuild and it sits in the image, so
+# every cold start pays to pull it too.
+#
+# Installing torch from the CPU index first means the next resolve sees the
+# requirement already satisfied and never reaches for the CUDA wheel.
+RUN uv pip install --index-url https://download.pytorch.org/whl/cpu torch
 RUN uv pip install fastmcp nest_asyncio "uvicorn[standard]" chromadb sentence-transformers
+
+# Pin the model cache to a path inside the image, for BOTH the build below and
+# the runtime server. Left to the default (~/.cache/huggingface) it depends on
+# HOME and on whatever HF Spaces injects into the runtime environment; if those
+# ever disagree, the server silently re-downloads the encoder on every start
+# instead of reading the copy already baked into the image.
+ENV HF_HOME=/home/user/app/.hfcache
+ENV SENTENCE_TRANSFORMERS_HOME=/home/user/app/.hfcache
+
+# Fetch the encoder as its own layer, so editing the indexer below does not
+# re-download it.
+RUN python3 -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')"
 
 # Build moogle from the SAME sources loogle was compiled against (Mathlib +
 # Batteries + Lean core). A failure here must not cost us the exact-search
@@ -90,6 +116,14 @@ RUN uv pip install fastmcp nest_asyncio "uvicorn[standard]" chromadb sentence-tr
 # loogle-only with an explicit message.
 RUN python3 build_moogle.py ${HOME}/loogle/.lake/packages ${HOME}/app/chroma_db \
     || echo "⚠️ moogle index build failed — Leak XI will serve loogle only"
+
+# From here on the hub is off limits. The encoder is already in the image, so a
+# runtime hub call could only mean the cache lookup missed — and a fast, loud
+# failure (moogle reports itself unavailable, loogle keeps serving) is better
+# than a silent multi-hundred-MB download on a cold start. Set AFTER the two
+# build steps above so they still run online.
+ENV HF_HUB_OFFLINE=1
+ENV TRANSFORMERS_OFFLINE=1
 
 ENV LOOGLE_DIR=${HOME}/loogle
 ENV CHROMA_DIR=${HOME}/app/chroma_db
