@@ -1,0 +1,9 @@
+# .git changes on EVERY commit. Without this it lands in the final `COPY . app`
+# and busts that layer even when no source file changed — which would quietly
+# undo the layer ordering the Dockerfile depends on.
+.git
+.gitattributes
+__pycache__
+*.pyc
+chroma_db
+.hfcache

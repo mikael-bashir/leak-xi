@@ -76,8 +76,17 @@ RUN lake exe cache get
 RUN lake build
 
 # --- Python side: MCP server + moogle index ---------------------------------
+#
+# LAYER ORDER IS LOad-BEARING HERE. Everything below is ordered cheapest-to-
+# invalidate last. Copying the whole repo up front — which is what this did —
+# meant every edit to server.py invalidated the copy, and therefore the pip
+# installs, the encoder fetch AND the 20-minute embedding pass beneath it.
+# Three server.py edits in one afternoon cost three full index rebuilds for no
+# reason: the index does not depend on server.py in any way.
+#
+# So: only the indexer and its inputs are copied before the index is built.
+# server.py lands afterwards, where a change to it costs a few seconds.
 WORKDIR ${HOME}/app
-COPY --chown=user . ${HOME}/app
 
 RUN uv python install 3.11
 RUN uv venv --python 3.11 ${HOME}/app/.venv
@@ -110,12 +119,21 @@ ENV SENTENCE_TRANSFORMERS_HOME=/home/user/app/.hfcache
 # re-download it.
 RUN python3 -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')"
 
+# The indexer, and ONLY the indexer. This is the last thing copied before the
+# expensive step, so the expensive step re-runs when the indexer changes and
+# never because something else did.
+COPY --chown=user build_moogle.py ${HOME}/app/build_moogle.py
+
 # Build moogle from the SAME sources loogle was compiled against (Mathlib +
 # Batteries + Lean core). A failure here must not cost us the exact-search
 # half, so it is non-fatal: server.py loads the index lazily and degrades to
 # loogle-only with an explicit message.
 RUN python3 build_moogle.py ${HOME}/loogle/.lake/packages ${HOME}/app/chroma_db \
     || echo "⚠️ moogle index build failed — Leak XI will serve loogle only"
+
+# Everything else, after the index. Editing the server from here is a
+# seconds-long rebuild.
+COPY --chown=user . ${HOME}/app
 
 # From here on the hub is off limits. The encoder is already in the image, so a
 # runtime hub call could only mean the cache lookup missed — and a fast, loud
