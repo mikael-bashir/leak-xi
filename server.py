@@ -356,29 +356,79 @@ def is_name_query(q: str) -> bool:
     return bool(NAME_RE.fullmatch(q.strip()))
 
 
+# loogle reports an absent name as an ERROR ("unknown identifier 'X'"), not as an
+# empty result set. Those are opposite meanings to a caller: one is the answer it
+# asked for, the other is a malfunction. Distinguishing them is the whole reason
+# this tool exists — a search that cannot return a falsifiable negative is just a
+# suggestion engine — so the classification lives here rather than being left to
+# whoever reads the raw string.
+# Both quoting styles occur in real loogle output ("unknown identifier `sum`" and
+# "unknown identifier 'Finset.sum_Icc_tsub'"). The delimiter is matched by
+# BACKREFERENCE rather than by a character class, because Lean names legitimately
+# contain `'` (`Nat.div_add_div'`) — a class-based closer swallows the closing
+# quote into the name and the equality test against the query then fails, which
+# silently routes a definitive negative back to the generic-error branch.
+UNKNOWN_NAME_ERR = re.compile(
+    r"unknown (?:identifier|constant)\s*(?:([`'\"])(.+?)\1|([A-Za-z_][A-Za-z0-9_'.!?]*))", re.I
+)
+PARSE_ERR = re.compile(r"expected|unexpected|<input>:\d+:\d+", re.I)
+
+LOOGLE_SYNTAX = (
+    "loogle takes LEAN, not prose. Valid shapes:\n"
+    "  Nat.mul_div_assoc        a constant\n"
+    '  "div_eq_zero"            a name substring, in quotes\n'
+    "  ?n / ?d = 0              a type pattern (`_` wildcard, `?a` metavariable)\n"
+    "  |- _ = _ * _             a conclusion\n"
+    "  Real.sin, \"pi\"           several filters, comma-separated\n"
+    "Every bare word is elaborated as a term, so `sum Icc (fun k => ...)` is read as an "
+    "application of a constant named `sum`. Anchor with a real constant, or call "
+    "moogle_search with the concept in English."
+)
+
+
+def _absent(name: str) -> str:
+    """The definitive negative. One text, reached from both the empty-result path
+    and the unknown-name error path, so the two can never drift apart."""
+    return (
+        f"NO DECLARATION NAMED `{name}` EXISTS in Mathlib @ {TOOLCHAIN}.\n"
+        f"This is a definitive negative: loogle searches the elaborated environment "
+        f"(Mathlib + Batteries + Lean core), not a text index.\n"
+        f"Do NOT retry a near-variant of this name — a name that fails is usually a "
+        f"whole naming CONVENTION that fails. Search for the FACT instead: give "
+        f"loogle_search a type pattern (e.g. `?n / ?d = 0`) or call moogle_search "
+        f"with the concept in English."
+    )
+
+
+def render_loogle_error(err: str, query: str) -> str:
+    q = query.strip().strip("`'\" ")
+    m = UNKNOWN_NAME_ERR.search(err)
+    if m:
+        name = (m.group(2) or m.group(3) or "").strip()
+        # The query WAS the name. This is not a failure — it is the answer.
+        if name == q:
+            return _absent(name)
+        # A name inside a larger query. Still settled for that name, but the
+        # query itself did not run, so say both.
+        return f"`{name}` does not exist in Mathlib @ {TOOLCHAIN}, so the query never ran.\n\n{LOOGLE_SYNTAX}"
+    if PARSE_ERR.search(err):
+        return f"Query was not valid Lean, so nothing was searched — this says NOTHING about what exists.\n{err}\n\n{LOOGLE_SYNTAX}"
+    return f"loogle backend error (not a statement about Mathlib): {err}"
+
+
 def render_loogle(result: dict, query: str) -> str:
     if not isinstance(result, dict):
-        return "Loogle Error: unexpected backend response."
+        return "loogle backend error (not a statement about Mathlib): unexpected response."
     if result.get("error"):
-        return f"Loogle Error: {result['error']}"
+        return render_loogle_error(str(result["error"]), query)
 
     hits = result.get("hits", [])
     if not hits:
-        # THE POINT OF THIS TOOL. loogle searches the elaborated environment, so
-        # zero hits for a name is not "try harder" — it is evidence the name is
-        # not in this Mathlib. Say so in terms the caller cannot mistake for a
-        # near-miss, because reading a near-miss into a miss is exactly what
+        # Zero hits for a name is not "try harder" — it is evidence the name is
+        # not in this Mathlib. Reading a near-miss into a miss is exactly what
         # sends a prover through five variants of a name that never existed.
         if is_name_query(query):
-            return (
-                f"NO DECLARATION NAMED `{query}` EXISTS in Mathlib @ {TOOLCHAIN}.\n"
-                f"This is a definitive negative: loogle searches the elaborated environment "
-                f"(Mathlib + Batteries + Lean core), not a text index.\n"
-                f"Do NOT retry a near-variant of this name — a name that fails is usually a "
-                f"whole naming CONVENTION that fails. Search for the FACT instead: give "
-                f"loogle_search a type pattern (e.g. `?n / ?d = 0`) or call moogle_search "
-                f"with the concept in English."
-            )
+            return _absent(query.strip())
         return (
             f"NO RESULTS for `{query}` in Mathlib @ {TOOLCHAIN}. Nothing in the environment "
             f"matches that pattern — the pattern is either too specific or shaped wrong. "
