@@ -5,5 +5,4 @@
 .gitattributes
 __pycache__
 *.pyc
-chroma_db
 .hfcache

@@ -156,9 +156,18 @@ def source_roots(packages_dir: str) -> list[tuple[str, str]]:
         (os.path.join(packages_dir, "mathlib"), "Mathlib"),
         (os.path.join(packages_dir, "batteries"), "Batteries"),
     ]
-    # Lean core ships its sources inside the elan toolchain. The directory is
-    # name-mangled per toolchain, so glob rather than hardcode.
-    for core in sorted(glob.glob(os.path.expanduser("~/.elan/toolchains/*/src/lean"))):
+    # Lean core ships its sources inside the elan toolchain. In the image that
+    # directory is name-mangled per toolchain, so glob rather than hardcode.
+    #
+    # LEAN_CORE_SRC overrides the glob, for building this index anywhere elan
+    # is not installed — which is the whole point of publishing the index as an
+    # artifact instead of recomputing it in every image build. The override
+    # must produce the SAME corpus as the glob, so it points at the same
+    # `src/lean` directory the toolchain would have provided.
+    cores = [os.environ["LEAN_CORE_SRC"]] if os.environ.get("LEAN_CORE_SRC") else sorted(
+        glob.glob(os.path.expanduser("~/.elan/toolchains/*/src/lean"))
+    )
+    for core in cores:
         roots.append((core, "Init"))
         roots.append((core, "Std"))
     return roots

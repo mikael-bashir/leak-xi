@@ -119,20 +119,18 @@ ENV SENTENCE_TRANSFORMERS_HOME=/home/user/app/.hfcache
 # re-download it.
 RUN python3 -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')"
 
-# The indexer, and ONLY the indexer. This is the last thing copied before the
-# expensive step, so the expensive step re-runs when the indexer changes and
-# never because something else did.
-COPY --chown=user build_moogle.py ${HOME}/app/build_moogle.py
-
-# Build moogle from the SAME sources loogle was compiled against (Mathlib +
-# Batteries + Lean core). A failure here must not cost us the exact-search
-# half, so it is non-fatal: server.py loads the index lazily and degrades to
-# loogle-only with an explicit message.
-RUN python3 build_moogle.py ${HOME}/loogle/.lake/packages ${HOME}/app/chroma_db \
-    || echo "⚠️ moogle index build failed — Leak XI will serve loogle only"
-
-# Everything else, after the index. Editing the server from here is a
-# seconds-long rebuild.
+# The moogle index is NOT built here. It ships in the repo, LFS-backed, exactly
+# as Leak-I has shipped its own for months — `chroma_db/** filter=lfs` in
+# .gitattributes, and this COPY brings it in.
+#
+# Building it in the image was the mistake. The index is a pure function of
+# (Mathlib rev, encoder, build_moogle.py); none of those change when server.py
+# does, yet every Dockerfile or source edit recomputed all 72,876 embeddings —
+# 20 minutes, several times over, for nothing. Layer ordering only narrowed the
+# set of edits that triggered it; editing this file still did.
+#
+# Regenerate with build_moogle.py (which stays in the repo) when Mathlib or the
+# encoder moves, and commit the result. That is the only time the cost is real.
 COPY --chown=user . ${HOME}/app
 
 # From here on the hub is off limits. The encoder is already in the image, so a
